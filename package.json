@@ -1,0 +1,28 @@
+{
+  "name": "os-agent",
+  "version": "0.2.0",
+  "type": "module",
+  "bin": {
+    "osa": "./src/cli.tsx"
+  },
+  "scripts": {
+    "start": "bun run src/cli.tsx",
+    "dev": "bun --watch run src/cli.tsx",
+    "test": "bun test src/tests/*.test.ts",
+    "test:integration": "bun test src/tests/integration/",
+    "test:all": "bun test src/tests/",
+    "test:watch": "bun test --watch src/tests/*.test.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
+    "ink": "^6.5.1",
+    "ink-text-input": "^6.0.0",
+    "marked": "^17.0.1",
+    "marked-terminal": "^7.3.0",
+    "openai": "^6.10.0",
+    "react": "^19.2.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7"
+  }
+}

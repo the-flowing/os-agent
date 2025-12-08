@@ -1,0 +1,14 @@
+# OS-Agent Configuration
+# Copy this file to osa.conf and fill in your values
+
+# API Configuration (CLI Proxy API)
+# See: https://github.com/anthropics/anthropic-quickstarts/tree/main/cli-proxy-api
+API_URL=http://localhost:8317/v1
+API_KEY=your-api-key-here
+MODEL=claude-sonnet-4-5-20250929
+
+# Available models:
+# - claude-sonnet-4-20250514
+# - claude-sonnet-4-5-20250929
+# - claude-opus-4-20250514
+# - claude-opus-4-1-20250805
