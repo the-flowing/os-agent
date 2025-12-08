@@ -4,6 +4,8 @@ import { render, Box, Text, useInput, useApp, Static, useStdout } from 'ink'
 import TextInput from 'ink-text-input'
 import { marked } from 'marked'
 import TerminalRenderer from 'marked-terminal'
+import { getAvailableModels, type AvailableModel } from './providers'
+import { getConfig } from './config'
 
 // Configurar marked para terminal
 marked.setOptions({
@@ -107,13 +109,12 @@ function UserPromptBox({ content, isLatest = false }: { content: string; isLates
 // Comando (bash/tool) - amarillo, collapsed para agente, expandido para usuario
 function CommandLine({ command, result, collapsed = false, showPrompt = false }: { command: string; result?: string; collapsed?: boolean; showPrompt?: boolean }) {
   const prefix = showPrompt ? '❯ ' : ''
-  const resultColor = '#9a8a5a' // amarillo apagado/gris
   if (collapsed) {
     const flatResult = result?.replace(/\n/g, ' ').substring(0, 60)
     return (
       <Box paddingX={2}>
         <Text color="yellow">
-          {prefix}{command}{flatResult ? <Text color={resultColor}> → {flatResult}{result && result.length > 60 ? '...' : ''}</Text> : ''}
+          {prefix}{command}{flatResult ? <Text color="white"> → {flatResult}{result && result.length > 60 ? '...' : ''}</Text> : ''}
         </Text>
       </Box>
     )
@@ -121,7 +122,7 @@ function CommandLine({ command, result, collapsed = false, showPrompt = false }:
   return (
     <Box paddingX={2} flexDirection="column">
       <Text color="yellow">{prefix}{command}</Text>
-      {result && <Text color={resultColor}>{result}</Text>}
+      {result && <Text color="white">{result}</Text>}
     </Box>
   )
 }
@@ -316,7 +317,7 @@ function HistoryItem({ role, content, toolName, toolParams, isLatest, plan }: Me
       // Solo el resultado, indentado debajo del comando
       return (
         <Box paddingLeft={6} paddingRight={2}>
-          <Text color="#9a8a5a">{content}</Text>
+          <Text color="white">{content}</Text>
         </Box>
       )
     case 'assistant':
@@ -341,6 +342,69 @@ function HistoryItem({ role, content, toolName, toolParams, isLatest, plan }: Me
 }
 // Cache para detección de comandos
 const bashDetectionCache = new Map<string, { isBash: boolean; confidence: number }>()
+
+// Model Picker - aparece con shift+tab
+function ModelPicker({
+  models,
+  currentModel,
+  onSelect,
+  onClose
+}: {
+  models: AvailableModel[]
+  currentModel: string
+  onSelect: (model: string) => void
+  onClose: () => void
+}) {
+  const [selectedIndex, setSelectedIndex] = useState(() => {
+    const idx = models.findIndex(m => m.alias === currentModel)
+    return idx >= 0 ? idx : 0
+  })
+
+  useInput((input, key) => {
+    if (key.escape || (key.shift && key.tab)) {
+      onClose()
+      return
+    }
+    if (key.upArrow) {
+      setSelectedIndex(i => (i > 0 ? i - 1 : models.length - 1))
+      return
+    }
+    if (key.downArrow) {
+      setSelectedIndex(i => (i < models.length - 1 ? i + 1 : 0))
+      return
+    }
+    if (key.return) {
+      onSelect(models[selectedIndex].alias)
+      onClose()
+      return
+    }
+  })
+
+  // Separar SOTA del resto
+  const sotaModels = models.filter(m => m.isSota)
+  const otherModels = models.filter(m => !m.isSota)
+
+  const renderModel = (model: AvailableModel, idx: number, globalIdx: number) => (
+    <Box key={model.alias}>
+      <Text color={globalIdx === selectedIndex ? 'cyan' : undefined}>
+        {globalIdx === selectedIndex ? '› ' : '  '}
+        {model.alias}
+        <Text dimColor> ({model.providerId})</Text>
+        {model.alias === currentModel && <Text color="green"> ✓</Text>}
+      </Text>
+    </Box>
+  )
+
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1}>
+      <Text color="magenta" bold>Modelo (↑↓ enter esc)</Text>
+      <Text dimColor>── sota ──</Text>
+      {sotaModels.map((m, i) => renderModel(m, i, i))}
+      <Text dimColor>── otros ──</Text>
+      {otherModels.map((m, i) => renderModel(m, i, sotaModels.length + i))}
+    </Box>
+  )
+}
 
 // Input separado para evitar re-renders del historial
 function InputBox({
@@ -475,6 +539,9 @@ function App() {
   const [hasInput, setHasInput] = useState(false) // Solo para cambio de colores
   const [activePlan, setActivePlan] = useState<Plan | null>(null) // Plan en ejecución
   const [clearTrigger, setClearTrigger] = useState(0) // Para limpiar input desde Ctrl+C
+  const [currentModel, setCurrentModel] = useState(() => getConfig().model)
+  const [availableModels, setAvailableModels] = useState<AvailableModel[]>([])
+  const [showModelPicker, setShowModelPicker] = useState(false)
 
   // Callback para cuando cambia el input (solo actualiza hasInput cuando cambia de vacío a no-vacío)
   const handleInputChange = useCallback((value: string, mode: 'text' | 'command') => {
@@ -482,12 +549,13 @@ function App() {
     setHasInput(prev => prev !== newHasInput ? newHasInput : prev)
   }, [])
 
-  // Cargar tools al inicio y limpiar pantalla
+  // Cargar tools y modelos al inicio y limpiar pantalla
   useEffect(() => {
     // Limpiar terminal para efecto fullscreen
     console.clear()
 
-    loadTools().then(() => {
+    Promise.all([loadTools(), getAvailableModels()]).then(([_, models]) => {
+      setAvailableModels(models)
       // Mensaje inicial del agente
       setMessages([
         { id: 'welcome', role: 'assistant', content: '¿Qué necesitás?' }
@@ -496,7 +564,7 @@ function App() {
     })
   }, [])
 
-  // Handle Ctrl+C: si hay input lo limpia, si no hay input sale
+  // Handle Ctrl+C y Shift+Tab
   useInput((char, key) => {
     if (key.ctrl && char === 'c') {
       if (hasInput) {
@@ -504,6 +572,12 @@ function App() {
       } else {
         exit()
       }
+      return
+    }
+    // Shift+Tab para model picker (solo si no está procesando y no tiene input)
+    if (key.shift && key.tab && !isProcessing && !showModelPicker) {
+      setShowModelPicker(true)
+      return
     }
   })
 
@@ -523,7 +597,7 @@ function App() {
       setMessages(m => [...m, {
         id: generateMessageId(),
         role: 'system',
-        content: `Comandos: /exit, /help\n@ para referenciar archivos\nCtrl+C limpia línea o sale\nclear para limpiar pantalla`
+        content: `Comandos: /exit, /help\n@ para referenciar archivos\nShift+Tab para cambiar modelo\nCtrl+C limpia línea o sale`
       }])
       return
     }
@@ -662,12 +736,12 @@ function App() {
           setIsProcessing(false)
           playNotificationSound()
         }
-      })
+      }, currentModel)
     } catch (e) {
       setMessages(m => [...m, { id: generateMessageId(), role: 'error', content: String(e) }])
       setIsProcessing(false)
     }
-  }, [isProcessing, history, exit])
+  }, [isProcessing, history, exit, currentModel])
 
   // Marcar últimos elementos como "latest"
   let lastAssistantIndex = -1
@@ -728,12 +802,35 @@ function App() {
         <AssistantResponseBox content={currentOutput} streaming={true} />
       )}
 
-      {/* Input - componente separado para evitar re-renders del historial */}
-      {!isProcessing && (
-        <InputBox onSubmit={handleSubmit} onInputChange={handleInputChange} clearTrigger={clearTrigger} />
+      {/* Model Picker */}
+      {showModelPicker && (
+        <ModelPicker
+          models={availableModels}
+          currentModel={currentModel}
+          onSelect={setCurrentModel}
+          onClose={() => setShowModelPicker(false)}
+        />
       )}
 
-      {isProcessing && <Text dimColor>Pensando...</Text>}
+      {/* Input con indicador de modelo arriba a la derecha */}
+      {!isProcessing && !showModelPicker && (
+        <Box flexDirection="column">
+          <Box justifyContent="flex-end">
+            <Text dimColor>{currentModel} </Text>
+            <Text color="#666">⇧⇥</Text>
+          </Box>
+          <InputBox onSubmit={handleSubmit} onInputChange={handleInputChange} clearTrigger={clearTrigger} />
+        </Box>
+      )}
+
+      {isProcessing && (
+        <Box flexDirection="column">
+          <Box justifyContent="flex-end">
+            <Text dimColor>{currentModel}</Text>
+          </Box>
+          <Text dimColor>Pensando...</Text>
+        </Box>
+      )}
     </Box>
   )
 }

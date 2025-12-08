@@ -4,7 +4,17 @@
 import { readdir } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import type { ToolDefinition, Tool } from './types'
-import type Anthropic from '@anthropic-ai/sdk'
+
+// Tipo de tool compatible con Claude API
+interface ClaudeTool {
+  name: string
+  description: string
+  input_schema: {
+    type: 'object'
+    properties: Record<string, unknown>
+    required?: string[]
+  }
+}
 
 const toolsDir = join(dirname(import.meta.path), 'tools')
 
@@ -51,14 +61,14 @@ export async function reloadAllTools(): Promise<void> {
   await loadTools()
 }
 
-export async function getToolDefinitions(): Promise<Anthropic.Tool[]> {
-  const definitions: Anthropic.Tool[] = []
+export async function getToolDefinitions(): Promise<ClaudeTool[]> {
+  const definitions: ClaudeTool[] = []
 
   for (const [, tool] of toolCache) {
     definitions.push({
       name: tool.definition.name,
       description: tool.definition.description,
-      input_schema: tool.definition.input_schema as Anthropic.Tool['input_schema']
+      input_schema: tool.definition.input_schema
     })
   }
 

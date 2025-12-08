@@ -1,49 +1,68 @@
-// Historial de conversación
-import type OpenAI from 'openai'
+// Historial de conversación (formato Claude nativo)
 
-export type Message = OpenAI.ChatCompletionMessageParam
+export interface ContentBlock {
+  type: 'text' | 'tool_use' | 'tool_result'
+  text?: string
+  id?: string
+  name?: string
+  input?: Record<string, unknown>
+  tool_use_id?: string
+  content?: string
+}
+
+export interface ClaudeMessage {
+  role: 'user' | 'assistant'
+  content: string | ContentBlock[]
+}
 
 export class ConversationHistory {
-  private messages: Message[] = []
-  private maxTokenEstimate = 100000 // Límite aproximado
+  private messages: ClaudeMessage[] = []
+  private system: string
+  private maxTokenEstimate = 100000
 
-  constructor(private systemPrompt?: string) {
-    if (systemPrompt) {
-      this.messages.push({ role: 'system', content: systemPrompt })
-    }
+  constructor(systemPrompt?: string) {
+    this.system = systemPrompt || 'Sos un asistente de programación. Usá las tools disponibles para completar tareas.'
   }
 
-  add(message: Message) {
-    this.messages.push(message)
-    this.maybeCompact()
+  getSystem(): string {
+    return this.system
   }
 
   addUser(content: string) {
-    this.add({ role: 'user', content })
+    this.messages.push({ role: 'user', content })
+    this.maybeCompact()
   }
 
   addAssistant(content: string) {
-    this.add({ role: 'assistant', content })
+    this.messages.push({ role: 'assistant', content })
+    this.maybeCompact()
   }
 
-  addToolCall(assistantMessage: OpenAI.ChatCompletionMessage) {
-    this.messages.push(assistantMessage)
+  // Add assistant message with content blocks (text + tool_use)
+  addClaudeAssistant(content: ContentBlock[]) {
+    this.messages.push({ role: 'assistant', content })
+    this.maybeCompact()
   }
 
-  addToolResult(toolCallId: string, content: string) {
-    this.add({ role: 'tool', tool_call_id: toolCallId, content })
+  // Add tool results as user message
+  addClaudeToolResults(results: { tool_use_id: string; content: string }[]) {
+    const blocks: ContentBlock[] = results.map(r => ({
+      type: 'tool_result',
+      tool_use_id: r.tool_use_id,
+      content: r.content
+    }))
+    this.messages.push({ role: 'user', content: blocks })
+    this.maybeCompact()
   }
 
-  getMessages(): Message[] {
+  getClaudeMessages(): ClaudeMessage[] {
     return [...this.messages]
   }
 
   clear() {
-    const system = this.messages.find(m => m.role === 'system')
-    this.messages = system ? [system] : []
+    this.messages = []
   }
 
-  // Estimación muy básica de tokens
   private estimateTokens(): number {
     return this.messages.reduce((acc, m) => {
       const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
@@ -51,22 +70,16 @@ export class ConversationHistory {
     }, 0)
   }
 
-  // Compactar si excede el límite (mantiene system + últimos mensajes)
   private maybeCompact() {
     if (this.estimateTokens() > this.maxTokenEstimate) {
-      const system = this.messages.find(m => m.role === 'system')
-      // Mantener últimos 20 mensajes
-      const recent = this.messages.slice(-20)
-      this.messages = system ? [system, ...recent] : recent
+      this.messages = this.messages.slice(-20)
     }
   }
 
-  // Resumen del historial
   summary(): string {
     const userCount = this.messages.filter(m => m.role === 'user').length
     const assistantCount = this.messages.filter(m => m.role === 'assistant').length
-    const toolCount = this.messages.filter(m => m.role === 'tool').length
-    return `${userCount} user, ${assistantCount} assistant, ${toolCount} tool calls`
+    return `${userCount} user, ${assistantCount} assistant`
   }
 }
 
@@ -76,7 +89,7 @@ const HISTORY_FILE = '.osa/history.json'
 export async function saveHistory(history: ConversationHistory): Promise<void> {
   try {
     await Bun.spawn(['mkdir', '-p', '.osa']).exited
-    await Bun.write(HISTORY_FILE, JSON.stringify(history.getMessages(), null, 2))
+    await Bun.write(HISTORY_FILE, JSON.stringify(history.getClaudeMessages(), null, 2))
   } catch {}
 }
 
@@ -85,11 +98,12 @@ export async function loadHistory(systemPrompt?: string): Promise<ConversationHi
   try {
     const file = Bun.file(HISTORY_FILE)
     if (await file.exists()) {
-      const messages = JSON.parse(await file.text())
-      // Solo cargar mensajes user/assistant (no system ni tools)
+      const messages = JSON.parse(await file.text()) as ClaudeMessage[]
       for (const msg of messages) {
-        if (msg.role === 'user' || msg.role === 'assistant') {
-          history.add(msg)
+        if (msg.role === 'user' && typeof msg.content === 'string') {
+          history.addUser(msg.content)
+        } else if (msg.role === 'assistant' && typeof msg.content === 'string') {
+          history.addAssistant(msg.content)
         }
       }
     }

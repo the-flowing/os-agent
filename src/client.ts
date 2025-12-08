@@ -1,18 +1,28 @@
-// Cliente usando formato OpenAI (compatible con el proxy)
-import OpenAI from 'openai'
+// Cliente usando inference() directo (sin HTTP)
+import { inference } from './proxy'
 import { getConfig } from './config'
 import { getToolDefinitions, executeTool } from './tool-loader'
 
 const config = getConfig()
 
-export const client = new OpenAI({
-  baseURL: config.baseURL,
-  apiKey: config.apiKey
-})
+export interface Message {
+  role: 'user' | 'assistant'
+  content: string | ContentBlock[]
+}
+
+export interface ContentBlock {
+  type: 'text' | 'tool_use' | 'tool_result'
+  text?: string
+  id?: string
+  name?: string
+  input?: Record<string, unknown>
+  tool_use_id?: string
+  content?: string
+}
 
 export interface ChatOptions {
   system?: string
-  messages?: OpenAI.ChatCompletionMessageParam[]
+  messages?: Message[]
 }
 
 export interface ChatResult {
@@ -21,80 +31,73 @@ export interface ChatResult {
   toolsUsed: string[]
 }
 
-// Convertir tools de formato Anthropic a OpenAI
-async function getOpenAITools(): Promise<OpenAI.ChatCompletionTool[]> {
-  const anthropicTools = await getToolDefinitions()
-
-  return anthropicTools.map(tool => ({
-    type: 'function' as const,
-    function: {
-      name: tool.name,
-      description: tool.description || '',
-      parameters: tool.input_schema as Record<string, unknown>
-    }
-  }))
-}
-
 // Chat stateless - para tests
 export async function chat(
   userMessage: string,
   options: ChatOptions = {}
 ): Promise<ChatResult> {
-  const tools = await getOpenAITools()
-  const messages: OpenAI.ChatCompletionMessageParam[] = options.messages || []
-
-  // System message
-  if (options.system || !messages.some(m => m.role === 'system')) {
-    messages.unshift({
-      role: 'system',
-      content: options.system || 'Sos un asistente de programación. Usá las tools disponibles para completar tareas.'
-    })
-  }
+  const tools = await getToolDefinitions()
+  const messages: Message[] = options.messages ? [...options.messages] : []
+  const system = options.system || 'Sos un asistente de programación. Usá las tools disponibles para completar tareas.'
 
   messages.push({ role: 'user', content: userMessage })
 
   let toolCallCount = 0
   const toolsUsed: string[] = []
 
-  let response = await client.chat.completions.create({
+  let response = await inference({
     model: config.model,
-    max_tokens: 8096,
-    tools,
-    messages
+    body: {
+      system,
+      messages,
+      tools,
+      max_tokens: 8096
+    }
   })
 
-  let assistantMessage = response.choices[0].message
-  messages.push(assistantMessage)
-
   // Loop de tool calls
-  while (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
-    for (const toolCall of assistantMessage.tool_calls) {
+  while (response.stop_reason === 'tool_use') {
+    const toolUseBlocks = (response.content as ContentBlock[]).filter(
+      (b: ContentBlock) => b.type === 'tool_use'
+    )
+
+    const toolResults: ContentBlock[] = []
+
+    for (const toolUse of toolUseBlocks) {
       toolCallCount++
-      toolsUsed.push(toolCall.function.name)
+      toolsUsed.push(toolUse.name!)
 
-      const params = JSON.parse(toolCall.function.arguments || '{}')
-      const result = await executeTool(toolCall.function.name, params)
-
-      messages.push({
-        role: 'tool',
-        tool_call_id: toolCall.id,
+      const result = await executeTool(toolUse.name!, toolUse.input || {})
+      toolResults.push({
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
         content: result
       })
     }
 
-    response = await client.chat.completions.create({
-      model: config.model,
-      max_tokens: 8096,
-      tools,
-      messages
-    })
+    // Add assistant response and tool results
+    messages.push({ role: 'assistant', content: response.content })
+    messages.push({ role: 'user', content: toolResults })
 
-    assistantMessage = response.choices[0].message
-    messages.push(assistantMessage)
+    response = await inference({
+      model: config.model,
+      body: {
+        system,
+        messages,
+        tools,
+        max_tokens: 8096
+      }
+    })
   }
 
+  // Extract text from response
+  const textBlocks = (response.content as ContentBlock[]).filter(
+    (b: ContentBlock) => b.type === 'text'
+  )
+  const text = textBlocks.map((b: ContentBlock) => b.text).join('')
+
   return {
-    text: assistantMessage.content || '',
+    text,
     toolCallCount,
     toolsUsed
   }

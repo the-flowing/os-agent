@@ -1,13 +1,8 @@
 // Auto-detección de tareas de desarrollo usando LLM
-import OpenAI from 'openai'
+import { inference } from './proxy'
 import { getConfig } from './config'
 
 const config = getConfig()
-
-const openai = new OpenAI({
-  baseURL: config.baseURL,
-  apiKey: config.apiKey
-})
 
 export interface ClassificationResult {
   needsPlan: boolean
@@ -47,17 +42,18 @@ Respondé SOLO con JSON válido, sin markdown ni explicaciones:
 
 export async function classifyTask(userInput: string): Promise<ClassificationResult> {
   try {
-    const response = await openai.chat.completions.create({
+    const response = await inference({
       model: config.model,
-      max_tokens: 500,
-      temperature: 0,  // Determinístico
-      messages: [
-        { role: 'system', content: CLASSIFIER_PROMPT },
-        { role: 'user', content: userInput }
-      ]
+      body: {
+        system: CLASSIFIER_PROMPT,
+        messages: [{ role: 'user', content: userInput }],
+        max_tokens: 500
+      }
     })
 
-    const content = response.choices[0]?.message?.content || ''
+    // Extract text from Claude response
+    const textBlocks = (response.content || []).filter((b: any) => b.type === 'text')
+    const content = textBlocks.map((b: any) => b.text).join('')
 
     // Parsear JSON (puede venir con ```json wrapper)
     const jsonMatch = content.match(/\{[\s\S]*\}/)

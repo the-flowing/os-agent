@@ -1,3 +1,6 @@
 node_modules
 dist
-osa.conf
+credentials
+.osa
+research
+.DS_Store

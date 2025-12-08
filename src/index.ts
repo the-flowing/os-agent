@@ -1,13 +1,29 @@
-import Anthropic from '@anthropic-ai/sdk'
+import { inference } from './proxy'
 import { notify, notifyError } from './notify'
 import { loadTools, getToolDefinitions, executeTool } from './tool-loader'
-import { client } from './client'
 import { getConfig } from './config'
 
 const config = getConfig()
 
+interface ContentBlock {
+  type: 'text' | 'tool_use' | 'tool_result'
+  text?: string
+  id?: string
+  name?: string
+  input?: Record<string, unknown>
+  tool_use_id?: string
+  content?: string
+}
+
+interface Message {
+  role: 'user' | 'assistant'
+  content: string | ContentBlock[]
+}
+
 // Estado de la conversación (stateful para el REPL)
-const messages: Anthropic.MessageParam[] = []
+const messages: Message[] = []
+const system = `Sos un asistente de programación. Tenés acceso a tools que podés usar.
+Cuando termines una tarea larga o necesites input del usuario, indicalo claramente.`
 
 interface ChatResult {
   text: string
@@ -20,26 +36,22 @@ async function chat(userMessage: string): Promise<ChatResult> {
   const tools = await getToolDefinitions()
   let toolCallCount = 0
 
-  const response = await client.messages.create({
+  let response = await inference({
     model: config.model,
-    max_tokens: 8096,
-    system: `Sos un asistente de programación. Tenés acceso a tools que podés usar.
-Cuando termines una tarea larga o necesites input del usuario, indicalo claramente.`,
-    tools,
-    messages
+    body: { system, messages, tools, max_tokens: 8096 }
   })
 
-  let assistantContent: Anthropic.ContentBlock[] = response.content
+  let assistantContent: ContentBlock[] = response.content
   messages.push({ role: 'assistant', content: assistantContent })
 
-  while (assistantContent.some(block => block.type === 'tool_use')) {
-    const toolResults: Anthropic.ToolResultBlockParam[] = []
+  while (response.stop_reason === 'tool_use') {
+    const toolResults: ContentBlock[] = []
 
     for (const block of assistantContent) {
       if (block.type === 'tool_use') {
         toolCallCount++
         console.log(`\n🔧 Ejecutando tool: ${block.name}`)
-        const result = await executeTool(block.name, block.input as Record<string, unknown>)
+        const result = await executeTool(block.name!, block.input || {})
         console.log(`   Resultado: ${result.substring(0, 100)}${result.length > 100 ? '...' : ''}`)
 
         toolResults.push({
@@ -52,22 +64,17 @@ Cuando termines una tarea larga o necesites input del usuario, indicalo claramen
 
     messages.push({ role: 'user', content: toolResults })
 
-    const nextResponse = await client.messages.create({
+    response = await inference({
       model: config.model,
-      max_tokens: 8096,
-      system: `Sos un asistente de programación. Tenés acceso a tools que podés usar.`,
-      tools,
-      messages
+      body: { system, messages, tools, max_tokens: 8096 }
     })
 
-    assistantContent = nextResponse.content
+    assistantContent = response.content
     messages.push({ role: 'assistant', content: assistantContent })
-
-    if (nextResponse.stop_reason !== 'tool_use') break
   }
 
   const textBlocks = assistantContent.filter(block => block.type === 'text')
-  const text = textBlocks.map(block => (block as Anthropic.TextBlock).text).join('\n')
+  const text = textBlocks.map(block => block.text || '').join('\n')
   return { text, toolCallCount }
 }
 
