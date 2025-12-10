@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test'
-import { classifyTask, formatPlanSuggestion } from '../auto-plan'
+import { classifyTask, formatPlanSuggestion, formatClarificationRequest, type ClassificationResult } from '../auto-plan'
 
 describe('Auto-plan classification (LLM)', () => {
   describe('detecta tareas de desarrollo', () => {
@@ -48,38 +48,123 @@ describe('Auto-plan classification (LLM)', () => {
     }, 30000)
   })
 
+  describe('comprensión del requerimiento', () => {
+    test('detecta requerimiento claro', async () => {
+      const result = await classifyTask('Creá una función validateEmail que retorne true si el email tiene @ y un dominio válido')
+      expect(result.needsPlan).toBe(true)
+      // Un requerimiento específico debería ser claro
+      if (result.understandingLevel === 'clear') {
+        expect(result.canDefineTests).toBe(true)
+      }
+    }, 30000)
+
+    test('detecta requerimiento ambiguo', async () => {
+      const result = await classifyTask('Hacé algo con los usuarios')
+      expect(result.needsPlan).toBe(true)
+      // Un requerimiento vago debería necesitar clarificación
+      expect(['needs_clarification', 'ambiguous']).toContain(result.understandingLevel)
+    }, 30000)
+  })
+
   describe('formatPlanSuggestion', () => {
-    test('formatea sugerencia con steps', () => {
-      const result = {
+    test('formatea sugerencia con steps cuando es claro', () => {
+      const result: ClassificationResult = {
         needsPlan: true,
         confidence: 0.9,
         reason: 'Es una feature nueva',
-        suggestedSteps: ['Crear interfaz', 'Implementar lógica', 'Agregar tests']
+        suggestedSteps: ['Crear interfaz', 'Implementar lógica', 'Agregar tests'],
+        understandingLevel: 'clear',
+        canDefineTests: true,
+        suggestedTests: ['Verificar que la interfaz existe', 'Verificar que la lógica funciona']
       }
       const suggestion = formatPlanSuggestion(result)
+      expect(suggestion).not.toBeNull()
       expect(suggestion).toContain('90%')
       expect(suggestion).toContain('Crear interfaz')
-      expect(suggestion).toContain('TDD')
+      expect(suggestion).toContain('Comprensión: clear')
+      expect(suggestion).toContain('Tests verificables: Sí')
+    })
+
+    test('muestra preguntas cuando necesita clarificación', () => {
+      const result: ClassificationResult = {
+        needsPlan: true,
+        confidence: 0.8,
+        reason: 'Parece una tarea de desarrollo',
+        understandingLevel: 'needs_clarification',
+        clarificationQuestions: ['¿Qué tipo de autenticación?', '¿Qué endpoints?'],
+        canDefineTests: false
+      }
+      const suggestion = formatPlanSuggestion(result)
+      expect(suggestion).not.toBeNull()
+      expect(suggestion).toContain('needs_clarification')
+      expect(suggestion).toContain('¿Qué tipo de autenticación?')
+      expect(suggestion).toContain('Clarificar el requerimiento')
     })
 
     test('retorna null si no necesita plan', () => {
-      const result = {
+      const result: ClassificationResult = {
         needsPlan: false,
         confidence: 0.8,
-        reason: 'Es una consulta'
+        reason: 'Es una consulta',
+        understandingLevel: 'clear',
+        canDefineTests: false
       }
       const suggestion = formatPlanSuggestion(result)
       expect(suggestion).toBeNull()
     })
 
     test('retorna null si baja confianza', () => {
-      const result = {
+      const result: ClassificationResult = {
         needsPlan: true,
         confidence: 0.4,  // Muy bajo
-        reason: 'No estoy seguro'
+        reason: 'No estoy seguro',
+        understandingLevel: 'ambiguous',
+        canDefineTests: false
       }
       const suggestion = formatPlanSuggestion(result)
       expect(suggestion).toBeNull()
+    })
+  })
+
+  describe('formatClarificationRequest', () => {
+    test('genera preguntas cuando hay clarificationQuestions', () => {
+      const result: ClassificationResult = {
+        needsPlan: true,
+        confidence: 0.8,
+        reason: 'Tarea de desarrollo',
+        understandingLevel: 'needs_clarification',
+        clarificationQuestions: ['¿JWT o session?', '¿Qué proveedores OAuth?'],
+        canDefineTests: false
+      }
+      const request = formatClarificationRequest(result)
+      expect(request).not.toBeNull()
+      expect(request).toContain('¿JWT o session?')
+      expect(request).toContain('¿Qué proveedores OAuth?')
+    })
+
+    test('genera preguntas genéricas cuando no hay específicas', () => {
+      const result: ClassificationResult = {
+        needsPlan: true,
+        confidence: 0.8,
+        reason: 'Tarea de desarrollo',
+        understandingLevel: 'ambiguous',
+        canDefineTests: false
+      }
+      const request = formatClarificationRequest(result)
+      expect(request).not.toBeNull()
+      expect(request).toContain('resultado específico')
+    })
+
+    test('retorna null cuando el requerimiento es claro', () => {
+      const result: ClassificationResult = {
+        needsPlan: true,
+        confidence: 0.9,
+        reason: 'Tarea clara',
+        understandingLevel: 'clear',
+        canDefineTests: true
+      }
+      const request = formatClarificationRequest(result)
+      expect(request).toBeNull()
     })
   })
 })

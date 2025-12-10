@@ -44,6 +44,11 @@ describe('Integración: Plan Flow', () => {
        Incluí 2 steps: uno para números pares y otro para impares.`
     )
 
+    // Configurar testing strategy (obligatorio antes de aprobar)
+    await chat(
+      `Configurá la testing strategy con action="set_testing", unitTestCommand="bun test", unitTestPattern="**/*.test.ts".`
+    )
+
     // Aprobar
     const approveResult = await chat(
       `Aprobá el plan usando la tool "plan" con action="approve".`
@@ -70,14 +75,19 @@ describe('Integración: Plan Flow', () => {
       `Usá plan con action="create", title="Test Simple", y un step que diga "Crear función hello".`
     )
 
-    // 2. Aprobar
+    // 2. Configurar testing strategy (obligatorio)
+    await chat(
+      `Usá plan con action="set_testing", unitTestCommand="bun test", unitTestPattern="**/*.test.ts".`
+    )
+
+    // 3. Aprobar
     await chat(`Usá plan con action="approve".`)
 
-    // 3. Ver step
+    // 4. Ver step
     const nextResult = await chat(`Usá plan con action="next".`)
     expect(nextResult.text).toMatch(/Step|hello/i)
 
-    // 4. Marcar como passed
+    // 5. Marcar como passed
     const passResult = await chat(`Usá plan con action="pass".`)
     expect(passResult.text).toMatch(/completado|🎉/i)
 

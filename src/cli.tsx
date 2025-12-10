@@ -31,7 +31,12 @@ import { streamChat } from './stream-client'
 import { ConversationHistory } from './history'
 import { SYSTEM_PROMPT } from './system-prompt'
 import { detectBashCommand, runBashCommand } from './bash-detect'
-import { loadPlans, type Plan, type Step, type StepStatus } from './plan'
+import { loadPlans, getActivePlan, type Plan, type Step, type StepStatus } from './plan'
+import { classifyTaskCached, formatClarificationRequest } from './auto-plan'
+import { detectTestingSetup, formatTestingDetection } from './testing-detection'
+import { LoginScreen, hasAnyCredentials } from './login-screen'
+import { deleteCredential } from './proxy/credentials'
+import { getProviderByModel } from './providers'
 // import { filterFiles } from './file-picker' // TODO: re-agregar file picker
 import * as fs from 'fs'
 
@@ -357,8 +362,11 @@ function ModelPicker({
 }) {
   const [selectedIndex, setSelectedIndex] = useState(() => {
     const idx = models.findIndex(m => m.alias === currentModel)
-    return idx >= 0 ? idx : 0
+    if (idx >= 0) return idx
+    const firstConnected = models.findIndex(m => m.hasCredential)
+    return firstConnected >= 0 ? firstConnected : 0
   })
+  const [notice, setNotice] = useState<string | null>(null)
 
   useInput((input, key) => {
     if (key.escape || (key.shift && key.tab)) {
@@ -374,7 +382,12 @@ function ModelPicker({
       return
     }
     if (key.return) {
-      onSelect(models[selectedIndex].alias)
+      const chosen = models[selectedIndex]
+      if (!chosen.hasCredential) {
+        setNotice(`Necesita login para ${chosen.providerId}. Usá /login.`)
+        return
+      }
+      onSelect(chosen.alias)
       onClose()
       return
     }
@@ -383,13 +396,15 @@ function ModelPicker({
   // Separar SOTA del resto
   const sotaModels = models.filter(m => m.isSota)
   const otherModels = models.filter(m => !m.isSota)
+  const connectedModels = models.filter(m => m.hasCredential)
+  const lockedModels = models.filter(m => !m.hasCredential)
 
   const renderModel = (model: AvailableModel, idx: number, globalIdx: number) => (
     <Box key={model.alias}>
-      <Text color={globalIdx === selectedIndex ? 'cyan' : undefined}>
+      <Text color={!model.hasCredential ? '#666' : globalIdx === selectedIndex ? 'cyan' : undefined} dimColor={!model.hasCredential}>
         {globalIdx === selectedIndex ? '› ' : '  '}
         {model.alias}
-        <Text dimColor> ({model.providerId})</Text>
+        <Text dimColor> ({model.providerId}{!model.hasCredential ? ' · login' : ''})</Text>
         {model.alias === currentModel && <Text color="green"> ✓</Text>}
       </Text>
     </Box>
@@ -398,10 +413,20 @@ function ModelPicker({
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1}>
       <Text color="magenta" bold>Modelo (↑↓ enter esc)</Text>
+      <Text dimColor>Enter elige solo modelos con login listo. Usa /login para conectar.</Text>
       <Text dimColor>── sota ──</Text>
       {sotaModels.map((m, i) => renderModel(m, i, i))}
       <Text dimColor>── otros ──</Text>
       {otherModels.map((m, i) => renderModel(m, i, sotaModels.length + i))}
+      {lockedModels.length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text dimColor>Modelos sin login: {lockedModels.map(m => m.alias).join(', ') || 'ninguno'}</Text>
+        </Box>
+      )}
+      {connectedModels.length === 0 && (
+        <Text color="yellow">No hay modelos disponibles. Conectá un proveedor con /login.</Text>
+      )}
+      {notice && <Text color="yellow">{notice}</Text>}
     </Box>
   )
 }
@@ -542,6 +567,8 @@ function App() {
   const [currentModel, setCurrentModel] = useState(() => getConfig().model)
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([])
   const [showModelPicker, setShowModelPicker] = useState(false)
+  const [showLogin, setShowLogin] = useState(() => !hasAnyCredentials())
+  const [banner, setBanner] = useState<string | null>(null)
 
   // Callback para cuando cambia el input (solo actualiza hasInput cuando cambia de vacío a no-vacío)
   const handleInputChange = useCallback((value: string, mode: 'text' | 'command') => {
@@ -558,7 +585,8 @@ function App() {
       setAvailableModels(models)
       // Mensaje inicial del agente
       setMessages([
-        { id: 'welcome', role: 'assistant', content: '¿Qué necesitás?' }
+        { id: 'welcome', role: 'assistant', content: '¿Qué necesitás?' },
+        { id: 'hint', role: 'system', content: 'Tips: /help · /login · /logout · Shift+Tab cambia modelo' }
       ])
       setReady(true)
     })
@@ -566,6 +594,7 @@ function App() {
 
   // Handle Ctrl+C y Shift+Tab
   useInput((char, key) => {
+    if (showLogin) return
     if (key.ctrl && char === 'c') {
       if (hasInput) {
         setClearTrigger(t => t + 1)
@@ -584,13 +613,34 @@ function App() {
   // Submit handler
   const handleSubmit = useCallback(async (value: string) => {
     const trimmed = value.trim()
-    if (!trimmed || isProcessing) return
+    if (showLogin || !trimmed || isProcessing) return
 
     setHasInput(false)
 
     // Comandos especiales
     if (trimmed === '/exit') {
             exit()
+      return
+    }
+    if (trimmed === '/login') {
+      setShowLogin(true)
+      setBanner(null)
+      return
+    }
+    if (trimmed === '/logout') {
+      const doLogout = async () => {
+        const provider = await getProviderByModel(currentModel)
+        if (!provider) {
+          setMessages(m => [...m, { id: generateMessageId(), role: 'error', content: 'No se pudo determinar provider para el modelo actual.' }])
+          return
+        }
+        const removed = deleteCredential(provider.id)
+        const models = await getAvailableModels()
+        setAvailableModels(models)
+        setMessages(m => [...m, { id: generateMessageId(), role: removed ? 'info' : 'error', content: removed ? `Credencial de ${provider.id} eliminada. Usá /login para reconectar.` : 'No había credencial para eliminar.' }])
+        setShowLogin(true)
+      }
+      await doLogout()
       return
     }
     if (trimmed === '/help') {
@@ -619,16 +669,79 @@ function App() {
     }
 
     // Procesar @ referencias
-    const { processed, files } = processFileReferences(trimmed)
+    let { processed, files } = processFileReferences(trimmed)
     if (files.length > 0) {
       setMessages(m => [...m, { id: generateMessageId(), role: 'info', content: `📎 ${files.join(', ')}` }])
     }
+
+    // Mostrar mensaje del usuario inmediatamente
+    setMessages(m => [...m, { id: generateMessageId(), role: 'user', content: trimmed }])
+
+    // === GATE: Clasificar tarea y forzar flujo de plan si es necesario ===
+    const currentActivePlan = await getActivePlan()
+
+    if (!currentActivePlan) {
+      try {
+        const classification = await classifyTaskCached(trimmed)
+
+        if (classification.needsPlan && classification.confidence > 0.6) {
+          // Si el requerimiento no es claro, mostrar preguntas de clarificación
+          if (classification.understandingLevel !== 'clear' && !classification.canDefineTests) {
+            const clarificationMsg = formatClarificationRequest(classification)
+            if (clarificationMsg) {
+              setMessages(m => [...m, {
+                id: generateMessageId(),
+                role: 'info',
+                content: clarificationMsg
+              }])
+              return
+            }
+          }
+
+          // Detectar testing setup del proyecto
+          const testingDetection = await detectTestingSetup()
+
+          // Inyectar contexto obligatorio para forzar el flujo de plan
+          const planEnforcementContext = `
+[PLAN_MODE_REQUIRED]
+Esta tarea requiere un plan TDD con verificación determinista.
+
+PASO 1 - EXPLORAR (obligatorio antes de planificar):
+Usá la tool "explore" para investigar el codebase:
+- ¿Qué tecnologías/frameworks se usan?
+- ¿Cómo funcionan features similares existentes?
+- ¿Dónde están los archivos relevantes?
+
+Solo preguntá al usuario lo que NO encontrés en el código.
+
+PASO 2 - TESTING:
+${testingDetection.found
+  ? `Testing detectado: ${testingDetection.strategy?.unitTestCommand}
+Confirmar con set_testing antes de crear plan.`
+  : 'No hay testing configurado. Incluir setup de tests como primer step del plan.'}
+
+PASO 3 - PLAN:
+Crear plan con action="create" incluyendo:
+- tests[] con descripción y tipo (unit/e2e) para cada step
+- verificationCommand específico para cada step
+
+PROHIBIDO: Usar create/patch sin plan aprobado.
+
+Requerimiento del usuario:
+${processed}
+`
+          processed = planEnforcementContext
+        }
+      } catch (e) {
+        console.error('Error en clasificación:', e)
+      }
+    }
+    // === FIN GATE ===
 
     // Chat con el modelo
     setIsProcessing(true)
     setCurrentOutput('')
     setRunningTool(null)
-    setMessages(m => [...m, { id: generateMessageId(), role: 'user', content: trimmed }])
 
     // Acumular output en variable local para evitar closure stale
     let accumulatedOutput = ''
@@ -738,10 +851,22 @@ function App() {
         }
       }, currentModel)
     } catch (e) {
-      setMessages(m => [...m, { id: generateMessageId(), role: 'error', content: String(e) }])
+      const msg = String(e)
+      setMessages(m => {
+        const last = m[m.length - 1]
+        if (last?.role === 'error' && last.content === msg) return m
+        return [...m, { id: generateMessageId(), role: 'error', content: msg }]
+      })
+      const lowerMsg = msg.toLowerCase()
+      if (lowerMsg.includes('credential') || lowerMsg.includes('login')) {
+        setBanner('⚠️ Error de credenciales. Probá /login para reconectar.')
+        setShowLogin(true)
+      } else {
+        setBanner('⚠️ Hubo un error. Probá nuevamente o revisá conexión/modelo.')
+      }
       setIsProcessing(false)
     }
-  }, [isProcessing, history, exit, currentModel])
+  }, [isProcessing, history, exit, currentModel, showLogin])
 
   // Marcar últimos elementos como "latest"
   let lastAssistantIndex = -1
@@ -757,6 +882,14 @@ function App() {
     if (lastAssistantIndex !== -1 && lastUserPromptIndex !== -1) break
   }
   const hasLatestAssistant = lastAssistantIndex > lastUserPromptIndex
+
+  if (showLogin) {
+    return <LoginScreen onComplete={() => { setShowLogin(false); setBanner(null) }} onLoginSuccess={async () => {
+      const models = await getAvailableModels()
+      setAvailableModels(models)
+      setBanner('✅ Login ok. Modelo activo: ' + currentModel)
+    }} />
+  }
 
   if (!ready) {
     return <Text>Cargando tools...</Text>
@@ -777,6 +910,13 @@ function App() {
           </Box>
         )}
       </Static>
+
+      {/* Banner de estado/errores */}
+      {banner && (
+        <Box>
+          <Text color="yellow">{banner}</Text>
+        </Box>
+      )}
 
       {/* Último mensaje - dinámico, puede cambiar de color */}
       {messages.length > 0 && (() => {

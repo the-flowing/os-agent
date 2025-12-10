@@ -2,6 +2,7 @@
 import { readdirSync } from "fs";
 import { join, dirname } from "path";
 import type { Provider } from "./types";
+import { hasCredentialForProvider } from "../proxy/credentials";
 
 export type { Provider, ModelConfig, AuthConfig, OAuthConfig, ApiKeyConfig, CredentialInfo, StreamEvent } from "./types";
 
@@ -113,6 +114,7 @@ export interface AvailableModel {
   upstream: string;
   providerId: string;
   isSota?: boolean;
+  hasCredential: boolean;
 }
 
 // SOTA models in order of preference
@@ -132,6 +134,7 @@ export async function getAvailableModels(): Promise<AvailableModel[]> {
         upstream: model.upstream,
         providerId: provider.id,
         isSota: i === 0, // First model of each provider is SOTA
+        hasCredential: hasCredentialForProvider(provider.id),
       };
 
       if (i === 0) {

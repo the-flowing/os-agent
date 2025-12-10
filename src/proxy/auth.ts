@@ -7,6 +7,7 @@ import { OAuthCredential, LoginOptions } from "./types";
 import { getProvider, Provider, OAuthConfig } from "../providers";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
+const DEBUG_AUTH = process.env.DEBUG === "*" || process.env.DEBUG?.includes("auth");
 
 async function openInBrowser(url: string) {
   return new Promise<void>((resolve) => {
@@ -343,10 +344,10 @@ async function geminiOnboarding(token: OAuthCredential, clientId: string, client
   }
 
   if (projectId) {
-    console.log(`Using Gemini CLI subscription project: ${projectId}`);
+    if (DEBUG_AUTH) console.log(`Using Gemini CLI subscription project: ${projectId}`);
   } else {
     // Fall back to fetching GCP projects
-    console.log("No subscription found, fetching GCP projects...");
+    if (DEBUG_AUTH) console.log("No subscription found, fetching GCP projects...");
     const projectsRes = await fetch("https://cloudresourcemanager.googleapis.com/v1/projects", { headers });
     if (!projectsRes.ok) {
       console.warn("Could not fetch GCP projects, skipping onboarding");
@@ -359,11 +360,11 @@ async function geminiOnboarding(token: OAuthCredential, clientId: string, client
       return token;
     }
     projectId = activeProjects[0].projectId;
-    console.log(`Using GCP project: ${projectId}`);
+    if (DEBUG_AUTH) console.log(`Using GCP project: ${projectId}`);
   }
 
   // 4. Call onboardUser
-  console.log("Onboarding user for Gemini CLI...");
+  if (DEBUG_AUTH) console.log("Onboarding user for Gemini CLI...");
   const onboardRes = await fetch("https://cloudcode-pa.googleapis.com/v1internal:onboardUser", {
     method: "POST",
     headers,
@@ -381,7 +382,7 @@ async function geminiOnboarding(token: OAuthCredential, clientId: string, client
   } else {
     const onboardData = await onboardRes.json() as { done?: boolean; response?: { cloudaicompanionProject?: string | { id?: string } } };
     if (onboardData.done) {
-      console.log("Onboarding complete!");
+      if (DEBUG_AUTH) console.log("Onboarding complete!");
       // Use project from response if available
       const resp = onboardData.response?.cloudaicompanionProject;
       if (typeof resp === "string" && resp.trim()) {
