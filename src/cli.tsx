@@ -31,9 +31,7 @@ import { streamChat } from './stream-client'
 import { ConversationHistory } from './history'
 import { SYSTEM_PROMPT } from './system-prompt'
 import { detectBashCommand, runBashCommand } from './bash-detect'
-import { loadPlans, getActivePlan, type Plan, type Step, type StepStatus } from './plan'
-import { classifyTaskCached, formatClarificationRequest } from './auto-plan'
-import { detectTestingSetup, formatTestingDetection } from './testing-detection'
+import { loadPlans, type Plan, type Step, type StepStatus } from './plan'
 import { LoginScreen, hasAnyCredentials } from './login-screen'
 import { deleteCredential } from './proxy/credentials'
 import { getProviderByModel } from './providers'
@@ -68,7 +66,7 @@ function processFileReferences(message: string): { processed: string; files: str
 }
 
 type MessageRole = 'user' | 'user-bash' | 'user-cancelled' | 'user-result' | 'assistant' | 'tool' | 'bash' | 'bash-cmd' | 'error' | 'info' | 'system' | 'header' | 'plan'
-type MessageWithId = { id: string; role: MessageRole; content: string; toolName?: string; toolParams?: Record<string, unknown>; isLatest?: boolean; plan?: Plan }
+type MessageWithId = { id: string; role: MessageRole; content: string; toolName?: string; toolParams?: Record<string, unknown>; isLatest?: boolean; plan?: Plan; model?: string }
 let messageIdCounter = 0
 const generateMessageId = () => `msg-${++messageIdCounter}`
 
@@ -133,7 +131,7 @@ function CommandLine({ command, result, collapsed = false, showPrompt = false }:
 }
 
 // Respuesta del asistente en cajita (streaming = naranja apagado, latest = naranja, viejo = naranja apagado)
-function AssistantResponseBox({ content, streaming = false, isLatest = false }: { content: string; streaming?: boolean; isLatest?: boolean }) {
+function AssistantResponseBox({ content, streaming = false, isLatest = false, model }: { content: string; streaming?: boolean; isLatest?: boolean; model?: string }) {
   const dimOrange = '#8a6a4a' // naranja apagado/gris
   const borderColor = isLatest ? '#ffaa55' : dimOrange
   // Solo texto apagado si no es latest y no está streaming
@@ -145,6 +143,11 @@ function AssistantResponseBox({ content, streaming = false, isLatest = false }: 
       paddingX={2}
       flexDirection="column"
     >
+      {model && (
+        <Box alignSelf="flex-end">
+          <Text dimColor>{model}</Text>
+        </Box>
+      )}
       <Text color={textColor}>{renderMarkdown(content)}</Text>
     </Box>
   )
@@ -306,7 +309,7 @@ function PlanFullscreen({
 }
 
 // Componente para renderizar un item del historial
-function HistoryItem({ role, content, toolName, toolParams, isLatest, plan }: MessageWithId) {
+function HistoryItem({ role, content, toolName, toolParams, isLatest, plan, model }: MessageWithId) {
   switch (role) {
     case 'header':
       return <Text color="cyan">{content}</Text>
@@ -326,7 +329,7 @@ function HistoryItem({ role, content, toolName, toolParams, isLatest, plan }: Me
         </Box>
       )
     case 'assistant':
-      return <AssistantResponseBox content={content} isLatest={isLatest} />
+      return <AssistantResponseBox content={content} isLatest={isLatest} model={model} />
     case 'tool':
       const cmd = toolName && toolParams ? formatToolAsCommand(toolName, toolParams) : toolName || ''
       return <CommandLine command={cmd} result={content} collapsed showPrompt />
@@ -585,7 +588,7 @@ function App() {
       setAvailableModels(models)
       // Mensaje inicial del agente
       setMessages([
-        { id: 'welcome', role: 'assistant', content: '¿Qué necesitás?' },
+        { id: 'welcome', role: 'assistant', content: '¿Qué necesitás?', model: getConfig().model },
         { id: 'hint', role: 'system', content: 'Tips: /help · /login · /logout · Shift+Tab cambia modelo' }
       ])
       setReady(true)
@@ -677,67 +680,6 @@ function App() {
     // Mostrar mensaje del usuario inmediatamente
     setMessages(m => [...m, { id: generateMessageId(), role: 'user', content: trimmed }])
 
-    // === GATE: Clasificar tarea y forzar flujo de plan si es necesario ===
-    const currentActivePlan = await getActivePlan()
-
-    if (!currentActivePlan) {
-      try {
-        const classification = await classifyTaskCached(trimmed)
-
-        if (classification.needsPlan && classification.confidence > 0.6) {
-          // Si el requerimiento no es claro, mostrar preguntas de clarificación
-          if (classification.understandingLevel !== 'clear' && !classification.canDefineTests) {
-            const clarificationMsg = formatClarificationRequest(classification)
-            if (clarificationMsg) {
-              setMessages(m => [...m, {
-                id: generateMessageId(),
-                role: 'info',
-                content: clarificationMsg
-              }])
-              return
-            }
-          }
-
-          // Detectar testing setup del proyecto
-          const testingDetection = await detectTestingSetup()
-
-          // Inyectar contexto obligatorio para forzar el flujo de plan
-          const planEnforcementContext = `
-[PLAN_MODE_REQUIRED]
-Esta tarea requiere un plan TDD con verificación determinista.
-
-PASO 1 - EXPLORAR (obligatorio antes de planificar):
-Usá la tool "explore" para investigar el codebase:
-- ¿Qué tecnologías/frameworks se usan?
-- ¿Cómo funcionan features similares existentes?
-- ¿Dónde están los archivos relevantes?
-
-Solo preguntá al usuario lo que NO encontrés en el código.
-
-PASO 2 - TESTING:
-${testingDetection.found
-  ? `Testing detectado: ${testingDetection.strategy?.unitTestCommand}
-Confirmar con set_testing antes de crear plan.`
-  : 'No hay testing configurado. Incluir setup de tests como primer step del plan.'}
-
-PASO 3 - PLAN:
-Crear plan con action="create" incluyendo:
-- tests[] con descripción y tipo (unit/e2e) para cada step
-- verificationCommand específico para cada step
-
-PROHIBIDO: Usar create/patch sin plan aprobado.
-
-Requerimiento del usuario:
-${processed}
-`
-          processed = planEnforcementContext
-        }
-      } catch (e) {
-        console.error('Error en clasificación:', e)
-      }
-    }
-    // === FIN GATE ===
-
     // Chat con el modelo
     setIsProcessing(true)
     setCurrentOutput('')
@@ -790,7 +732,7 @@ ${processed}
               } else if (action === 'create' || action === 'batch_update' || action === 'update_step' || action === 'add_step' || action === 'remove_step') {
                 // Mostrar plan draft en historial
                 if (accumulatedOutput.trim()) {
-                  setMessages(m => [...m, { id: generateMessageId(), role: 'assistant', content: accumulatedOutput }])
+                  setMessages(m => [...m, { id: generateMessageId(), role: 'assistant', content: accumulatedOutput, model: currentModel }])
                 }
                 const plans = await loadPlans()
                 const planToShow = plans.find(p => p.status === 'draft') || plans[plans.length - 1]
@@ -843,7 +785,7 @@ ${processed}
         },
         onDone: () => {
           if (accumulatedOutput && !skipAssistantOutput) {
-            setMessages(m => [...m, { id: generateMessageId(), role: 'assistant', content: accumulatedOutput }])
+            setMessages(m => [...m, { id: generateMessageId(), role: 'assistant', content: accumulatedOutput, model: currentModel }])
           }
           setCurrentOutput('')
           setIsProcessing(false)
@@ -939,7 +881,7 @@ ${processed}
 
       {/* Current streaming output - cajita mientras streamea */}
       {currentOutput && (
-        <AssistantResponseBox content={currentOutput} streaming={true} />
+        <AssistantResponseBox content={currentOutput} streaming={true} model={currentModel} />
       )}
 
       {/* Model Picker */}

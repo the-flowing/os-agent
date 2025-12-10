@@ -21,6 +21,8 @@ Tenés acceso a estas tools:
 - **plan**: Gestionar planes de desarrollo con TDD y Testing Strategy
 - **task**: Ejecutar tareas en sandbox aislado
 
+Si la tarea implica cambios de código multi-step o requiere tests/TDD, invocá la tool **plan** (create/batch_update/approve/next/verify/pass). No uses create/patch para implementar sin un plan aprobado cuando el trabajo requiere verificación con tests.
+
 ## Flujo de trabajo TDD con Verificación Determinista
 
 ### ANTES de crear cualquier plan - OBLIGATORIO:

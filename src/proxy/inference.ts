@@ -9,6 +9,7 @@ import {
 } from "../providers";
 import { translateRequest as codexTranslate } from "../providers/chatgpt";
 import { translateRequest as geminiTranslate } from "../providers/gemini";
+import { createTraceLogger, logStreamToTrace, redactForTrace, redactHeadersForTrace } from "../tracing";
 
 // Debug logging - set DEBUG=inference or DEBUG=* to enable
 const DEBUG = process.env.DEBUG?.includes("inference") || process.env.DEBUG === "*";
@@ -131,20 +132,59 @@ async function prepareRequest(req: InferenceRequest, opts?: InferenceOptions) {
   return { provider, upstreamModel, url, headers, body, opts };
 }
 
+function safeParseJson(text: string): any {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
 export async function inference(req: InferenceRequest, opts?: InferenceOptions) {
-  const { url, headers, body, opts: options } = await prepareRequest(req, opts);
+  const { provider, upstreamModel, url, headers, body, opts: options } = await prepareRequest(req, opts);
+  const trace = await createTraceLogger({
+    provider: provider.id,
+    model: req.model ?? upstreamModel,
+    protocol: provider.protocol,
+    url,
+    stream: false,
+  });
+
+  await trace.write({
+    type: "request",
+    headers: redactHeadersForTrace(headers),
+    body: redactForTrace(body),
+  });
 
   const attempts = defaultAttempts(options);
   const maxInterval = defaultMaxInterval(options);
 
-  const res = await doFetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-    signal: req.signal,
-  }, attempts, maxInterval);
+  let res: Response;
+
+  try {
+    res = await doFetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: req.signal,
+    }, attempts, maxInterval);
+  } catch (err) {
+    await trace.write({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    throw err;
+  }
+
+  const responseHeaders = Object.fromEntries(res.headers.entries());
 
   const text = await res.text();
+  const traceBody = redactForTrace(safeParseJson(text));
+
+  await trace.write({
+    type: "response",
+    status: res.status,
+    headers: redactHeadersForTrace(responseHeaders),
+    body: traceBody,
+  });
+
   let json: any;
   try {
     json = JSON.parse(text);
@@ -163,27 +203,77 @@ export async function inferenceStream(req: InferenceRequest, opts?: InferenceOpt
   model: string;
 }> {
   const { provider, upstreamModel, url, headers, body } = await prepareRequest(req, opts);
+  const trace = await createTraceLogger({
+    provider: provider.id,
+    model: req.model ?? upstreamModel,
+    protocol: provider.protocol,
+    url,
+    stream: true,
+  });
+
+  await trace.write({
+    type: "request",
+    headers: redactHeadersForTrace(headers),
+    body: redactForTrace(body),
+  });
 
   // Force streaming (except Gemini which uses SSE via URL param)
   if (provider.protocol !== "gemini") {
     body.stream = true;
   }
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-    signal: req.signal,
-  });
+  let res: Response;
+
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: req.signal,
+    });
+  } catch (err) {
+    await trace.write({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    throw err;
+  }
+
+  const responseHeaders = Object.fromEntries(res.headers.entries());
 
   if (!res.ok) {
     const text = await res.text();
+    await trace.write({
+      type: "error",
+      status: res.status,
+      headers: redactHeadersForTrace(responseHeaders),
+      body: redactForTrace(safeParseJson(text)),
+    });
     throw new Error(`Upstream error ${res.status}: ${text}`);
   }
 
   if (!res.body) {
+    await trace.write({ type: "error", message: "No response body for streaming" });
     throw new Error("No response body for streaming");
   }
 
-  return { stream: res.body, provider, model: upstreamModel };
+  await trace.write({
+    type: "response",
+    status: res.status,
+    headers: redactHeadersForTrace(responseHeaders),
+    body: { stream: true },
+  });
+
+  let streamForClient: ReadableStream<Uint8Array> = res.body;
+
+  try {
+    if (typeof res.body.tee === "function") {
+      const [clientStream, traceStream] = res.body.tee();
+      streamForClient = clientStream;
+      logStreamToTrace(traceStream, trace);
+    } else {
+      logStreamToTrace(res.body, trace);
+    }
+  } catch (err) {
+    await trace.write({ type: "error", message: err instanceof Error ? err.message : String(err) });
+  }
+
+  return { stream: streamForClient, provider, model: upstreamModel };
 }
